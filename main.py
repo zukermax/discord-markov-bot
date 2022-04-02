@@ -1,83 +1,127 @@
 import discord
 import os
 import random
+from collections import defaultdict, Counter
+from typing import Optional
 
 
-#  Text Loading 
+#  Markov Chain Engine 
 
-def load_text_files(*file_paths):
-    """Read and concatenate multiple text/CSV files into one string."""
-    combined = ""
-    for path in file_paths:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                combined += f.read() + "\n"
-        except FileNotFoundError:
-            print(f"Warning: {path} not found, skipping.")
-    return combined
-
-
-#  Markov Chain 
-
-def build_markov_chain(text, state_size=2):
+class MarkovChain:
     """
-    Build a Markov chain transition table from the given text.
-    Returns a dict mapping each word-tuple state to a list of possible next words.
+    Probabilistic text generator built on variable-order Markov chains.
+    Transition probabilities are derived from observed n-gram frequencies
+    in the training corpus.
     """
-    words = text.split()
-    chain = {}
-    for i in range(len(words) - state_size):
-        state = tuple(words[i : i + state_size])
-        next_word = words[i + state_size]
-        if state not in chain:
-            chain[state] = []
-        chain[state].append(next_word)
-    return chain
 
+    def __init__(self, state_size: int = 2):
+        self.state_size = state_size
+        self._transitions: dict = defaultdict(Counter)
+        self._start_states: list = []
 
-def make_sentence(chain, state_size=2, max_words=60):
-    """
-    Walk the Markov chain to produce one sentence.
-    Prefers states that begin with a capitalised word so output reads naturally.
-    Returns None if the chain is empty.
-    """
-    if not chain:
+    def train(self, corpus: str) -> "MarkovChain":
+        """
+        Tokenise the corpus and populate the transition table.
+        Sentence-initial states (first word capitalised) are tracked
+        separately to ensure natural-sounding sentence starts.
+        """
+        tokens = corpus.split()
+        n = self.state_size
+
+        for i in range(len(tokens) - n):
+            state = tuple(tokens[i : i + n])
+            successor = tokens[i + n]
+            self._transitions[state][successor] += 1
+            if (i == 0 or tokens[i - 1][-1] in ".!?") and state[0][0].isupper():
+                if state not in self._start_states:
+                    self._start_states.append(state)
+
+        return self
+
+    def _weighted_next(self, state: tuple) -> Optional[str]:
+        """Sample a successor token weighted by observed co-occurrence frequency."""
+        counter = self._transitions.get(state)
+        if not counter:
+            return None
+        population = list(counter.keys())
+        weights = list(counter.values())
+        return random.choices(population, weights=weights, k=1)[0]
+
+    def _is_well_formed(self, tokens: list, min_words: int = 6) -> bool:
+        """Return True only if the token sequence reads as a complete sentence."""
+        if len(tokens) < min_words:
+            return False
+        if not tokens[0][0].isupper():
+            return False
+        if tokens[-1][-1] not in ".!?":
+            return False
+        return True
+
+    def generate(
+        self,
+        max_words: int = 60,
+        min_words: int = 6,
+        max_attempts: int = 200,
+    ) -> Optional[str]:
+        """
+        Walk the transition table from a sentence-initial state, applying
+        frequency-weighted sampling at each step. Backtracks and retries
+        up to max_attempts times until a well-formed sentence is produced.
+        """
+        start_pool = self._start_states or list(self._transitions.keys())
+        if not start_pool:
+            return None
+
+        for _ in range(max_attempts):
+            state = random.choice(start_pool)
+            tokens = list(state)
+
+            for _ in range(max_words - self.state_size):
+                next_token = self._weighted_next(state)
+                if next_token is None:
+                    break
+                tokens.append(next_token)
+                state = tuple(tokens[-self.state_size :])
+
+                # Terminate early on a sentence-boundary token
+                if next_token[-1] in ".!?" and len(tokens) >= min_words:
+                    break
+
+            if self._is_well_formed(tokens, min_words):
+                return " ".join(tokens)
+
         return None
 
-    # Prefer states whose first word starts with a capital letter
-    start_states = [s for s in chain if s[0][0].isupper()]
-    if not start_states:
-        start_states = list(chain.keys())
 
-    state = random.choice(start_states)
-    words = list(state)
+#  Corpus Loading 
 
-    for _ in range(max_words - state_size):
-        if state not in chain:
-            break
-        next_word = random.choice(chain[state])
-        words.append(next_word)
-        state = tuple(words[-state_size:])
-
-    sentence = " ".join(words)
-    # Ensure the sentence ends with punctuation
-    if sentence and sentence[-1] not in ".!?":
-        sentence += "."
-    return sentence
+def load_corpus(*file_paths: str, encoding: str = "utf-8") -> str:
+    """
+    Stream multiple source files into a single normalised corpus string.
+    Missing files are skipped with a warning rather than raising.
+    """
+    segments: list = []
+    for path in file_paths:
+        try:
+            with open(path, "r", encoding=encoding, errors="ignore") as fh:
+                segments.append(fh.read())
+        except FileNotFoundError:
+            print(f"[corpus] Warning: '{path}' not found  skipping.")
+    return "\n".join(segments)
 
 
-def generate_quote(chain, state_size=2):
-    """Keep generating until we get a non-empty sentence."""
-    result = None
-    while not result:
-        result = make_sentence(chain, state_size=state_size)
+#  Model Initialisation 
+
+_corpus = load_corpus("general.csv", "how_1.csv", "how_2.csv", "how_3.csv")
+_model  = MarkovChain(state_size=2).train(_corpus)
+
+
+def generate_quote() -> str:
+    """Request a sentence from the model, retrying until one is produced."""
+    result: Optional[str] = None
+    while result is None:
+        result = _model.generate()
     return result
-
-
-#  Startup: build the model once 
-
-raw_text = load_text_files("general.csv", "how_1.csv", "how_2.csv", "how_3.csv")
-CHAIN = build_markov_chain(raw_text, state_size=2)
 
 
 #  Discord Bot 
@@ -86,18 +130,17 @@ client = discord.Client()
 
 
 @client.event
-async def on_ready():
+async def on_ready() -> None:
     print("bot online".format(client))
 
 
 @client.event
-async def on_message(message):
+async def on_message(message: discord.Message) -> None:
     if message.author == client.user:
         return
 
     if message.content.startswith("!piss"):
-        quote = generate_quote(CHAIN)
-        await message.channel.send(quote)
+        await message.channel.send(generate_quote())
 
 
 client.run(os.getenv("DISCORD_TOKEN"))
