@@ -112,7 +112,7 @@ def load_corpus(*file_paths: str, encoding: str = "utf-8") -> str:
 
 #  Model Initialisation 
 
-_corpus = load_corpus("general.csv", "how_1.csv", "how_2.csv", "how_3.csv")
+_corpus = load_corpus("text.csv")
 _model  = MarkovChain(state_size=2).train(_corpus)
 
 
