@@ -1,0 +1,6 @@
+.env
+nohup.out
+*.bk
+*.new
+__pycache__/
+*.pyc
